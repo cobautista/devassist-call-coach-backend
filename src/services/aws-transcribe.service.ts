@@ -191,13 +191,29 @@ export class AWSTranscribeService {
         );
       }
     } catch (error: any) {
+      // Check if this is a premature close error (expected when client disconnects)
+      const isPrematureClose = error.code === 'ERR_STREAM_PREMATURE_CLOSE' ||
+                                error.message?.includes('Premature close');
+
+      if (isPrematureClose) {
+        logger.warn('Transcription stream closed prematurely', {
+          sessionId: session.sessionId,
+          message: 'Client likely disconnected before sending audio',
+        });
+        // Clean up session without retrying
+        session.isActive = false;
+        this.activeSessions.delete(session.sessionId);
+        return;
+      }
+
       logger.error('Error in transcription stream', {
         sessionId: session.sessionId,
         error: error.message,
+        code: error.code,
         retryCount: session.retryCount,
       });
 
-      // Handle retry logic
+      // Handle retry logic for non-premature-close errors
       if (session.retryCount < this.maxRetries && session.isActive) {
         session.retryCount++;
         logger.info('Retrying transcription', {
@@ -215,6 +231,10 @@ export class AWSTranscribeService {
           sessionId: session.sessionId,
         });
 
+        // Clean up session
+        session.isActive = false;
+        this.activeSessions.delete(session.sessionId);
+
         if (session.onError) {
           session.onError(error);
         }
@@ -228,10 +248,25 @@ export class AWSTranscribeService {
   private async *createAudioStream(
     inputStream: AudioInputStream
   ): AsyncIterable<AudioStream> {
-    for await (const chunk of inputStream) {
-      if (chunk) {
-        yield { AudioEvent: { AudioChunk: chunk } };
+    try {
+      for await (const chunk of inputStream) {
+        if (chunk) {
+          yield { AudioEvent: { AudioChunk: chunk } };
+        }
       }
+    } catch (error: any) {
+      // Handle stream errors gracefully (e.g., premature close)
+      if (error.code === 'ERR_STREAM_PREMATURE_CLOSE') {
+        logger.warn('Audio stream closed prematurely', {
+          message: 'Client disconnected before sending audio data',
+        });
+      } else {
+        logger.error('Error in audio stream', {
+          error: error.message,
+          code: error.code,
+        });
+      }
+      // Don't rethrow - allow graceful termination
     }
   }
 
@@ -251,11 +286,20 @@ export class AWSTranscribeService {
         }
       }
     } catch (error: any) {
-      logger.error('Error processing transcript stream', {
-        sessionId: session.sessionId,
-        error: error.message,
-      });
-      throw error;
+      // Handle stream errors gracefully
+      if (error.code === 'ERR_STREAM_PREMATURE_CLOSE') {
+        logger.warn('Transcript stream closed prematurely', {
+          sessionId: session.sessionId,
+          message: 'Stream ended before transcription completed',
+        });
+      } else {
+        logger.error('Error processing transcript stream', {
+          sessionId: session.sessionId,
+          error: error.message,
+          code: error.code,
+        });
+      }
+      // Don't rethrow - allow graceful cleanup
     }
   }
 
@@ -368,6 +412,15 @@ export class AWSTranscribeService {
 class AudioInputStream extends Readable {
   constructor() {
     super();
+
+    // Add error handler to prevent unhandled errors from crashing the process
+    this.on('error', (error: any) => {
+      logger.warn('AudioInputStream error', {
+        error: error.message,
+        code: error.code,
+      });
+      // Error is logged but not rethrown - prevents process crash
+    });
   }
 
   _read(): void {
