@@ -6,7 +6,6 @@
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "build": "tsc",
-    "postinstall": "npm run build",
     "start": "node dist/server.js",
     "start:dev": "tsx src/server.ts",
     "test": "vitest",

@@ -1,0 +1,54 @@
+# Elastic Beanstalk ignore file
+# This file tells EB which files to EXCLUDE from deployment
+# (Opposite of .gitignore - this EXCLUDES files from EB package)
+
+# DO NOT ignore dist/ - we need compiled JS files!
+# dist/
+
+# Development files
+node_modules/
+.git/
+.gitignore
+.vscode/
+.idea/
+
+# Test files
+tests/
+test/
+*.test.ts
+*.test.js
+*.spec.ts
+*.spec.js
+coverage/
+
+# Development tools
+.eslintrc*
+.prettierrc*
+tsconfig.json
+
+# Documentation
+README.md
+docs/
+*.md
+
+# Logs
+logs/
+*.log
+
+# Environment files (sensitive)
+.env
+.env.local
+.env.production
+
+# Elastic Beanstalk files
+.elasticbeanstalk/
+.ebextensions/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Development scripts
+test-*.js
+test-*.sh
+fix-*.sh
