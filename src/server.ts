@@ -37,7 +37,21 @@ for (const env of requiredEnv) {
 // Initialize services
 const aiAnalysisService = new AIAnalysisService();
 const conversationService = new ConversationService();
-const awsTranscribeService = new AWSTranscribeService();
+
+// AWS Transcribe is optional - only initialize if credentials are configured
+let awsTranscribeService: AWSTranscribeService | null = null;
+if (process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY) {
+  try {
+    awsTranscribeService = new AWSTranscribeService();
+    serverLogger.info('AWS Transcribe service initialized');
+  } catch (error: any) {
+    serverLogger.warn('Failed to initialize AWS Transcribe service', {
+      error: error.message,
+    });
+  }
+} else {
+  serverLogger.info('AWS Transcribe service disabled (credentials not configured)');
+}
 
 // Create Express app
 const app = express();
@@ -205,6 +219,14 @@ app.post('/api/auth/deepgram-token', async (req, res) => {
  */
 app.post('/api/transcribe/start', async (req, res) => {
   try {
+    // Check if AWS Transcribe is enabled
+    if (!awsTranscribeService) {
+      return res.status(503).json({
+        error: 'Service Unavailable',
+        message: 'AWS Transcribe service is not configured. Please set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY environment variables.',
+      });
+    }
+
     // Authenticate
     const apiKey = req.headers['x-api-key'];
     if (!apiKey || apiKey !== process.env.BACKEND_API_KEY) {
@@ -258,6 +280,14 @@ app.post('/api/transcribe/start', async (req, res) => {
  */
 app.post('/api/transcribe/chunk', async (req, res) => {
   try {
+    // Check if AWS Transcribe is enabled
+    if (!awsTranscribeService) {
+      return res.status(503).json({
+        error: 'Service Unavailable',
+        message: 'AWS Transcribe service is not configured',
+      });
+    }
+
     // Authenticate
     const apiKey = req.headers['x-api-key'];
     if (!apiKey || apiKey !== process.env.BACKEND_API_KEY) {
@@ -341,6 +371,14 @@ app.post('/api/transcribe/chunk', async (req, res) => {
  */
 app.post('/api/transcribe/end', async (req, res) => {
   try {
+    // Check if AWS Transcribe is enabled
+    if (!awsTranscribeService) {
+      return res.status(503).json({
+        error: 'Service Unavailable',
+        message: 'AWS Transcribe service is not configured',
+      });
+    }
+
     // Authenticate
     const apiKey = req.headers['x-api-key'];
     if (!apiKey || apiKey !== process.env.BACKEND_API_KEY) {
@@ -867,6 +905,20 @@ io.on('connection', (socket: Socket) => {
    */
   socket.on('START_TRANSCRIPTION', async (payload: StartTranscriptionPayload) => {
     try {
+      // Check if AWS Transcribe is enabled
+      if (!awsTranscribeService) {
+        socket.emit('ERROR', {
+          type: 'ERROR',
+          payload: {
+            sessionId: payload.sessionId,
+            message: 'AWS Transcribe service is not configured',
+            code: 'SERVICE_UNAVAILABLE',
+            timestamp: Date.now(),
+          },
+        });
+        return;
+      }
+
       const { sessionId } = payload;
 
       serverLogger.info('Starting transcription session', {
@@ -952,6 +1004,20 @@ io.on('connection', (socket: Socket) => {
    */
   socket.on('AUDIO_CHUNK', async (payload: AudioChunkPayload) => {
     try {
+      // Check if AWS Transcribe is enabled
+      if (!awsTranscribeService) {
+        socket.emit('ERROR', {
+          type: 'ERROR',
+          payload: {
+            sessionId: payload.sessionId,
+            message: 'AWS Transcribe service is not configured',
+            code: 'SERVICE_UNAVAILABLE',
+            timestamp: Date.now(),
+          },
+        });
+        return;
+      }
+
       const { chunk, sessionId, timestamp } = payload;
 
       // Convert chunk to Buffer
@@ -1031,6 +1097,20 @@ io.on('connection', (socket: Socket) => {
    */
   socket.on('END_TRANSCRIPTION', async (payload: EndTranscriptionPayload) => {
     try {
+      // Check if AWS Transcribe is enabled
+      if (!awsTranscribeService) {
+        socket.emit('ERROR', {
+          type: 'ERROR',
+          payload: {
+            sessionId: payload.sessionId,
+            message: 'AWS Transcribe service is not configured',
+            code: 'SERVICE_UNAVAILABLE',
+            timestamp: Date.now(),
+          },
+        });
+        return;
+      }
+
       const { sessionId } = payload;
 
       serverLogger.info('Ending transcription session', { sessionId });
@@ -1085,12 +1165,14 @@ io.on('connection', (socket: Socket) => {
     // Note: We don't have socket-to-session mapping here
     // Sessions should be ended explicitly by clients via END_TRANSCRIPTION
     // But we'll log active sessions for monitoring
-    const activeSessionCount = awsTranscribeService.getActiveSessionCount();
-    if (activeSessionCount > 0) {
-      serverLogger.warn('Client disconnected with active transcription sessions', {
-        socketId: socket.id,
-        activeSessionCount,
-      });
+    if (awsTranscribeService) {
+      const activeSessionCount = awsTranscribeService.getActiveSessionCount();
+      if (activeSessionCount > 0) {
+        serverLogger.warn('Client disconnected with active transcription sessions', {
+          socketId: socket.id,
+          activeSessionCount,
+        });
+      }
     }
   });
 });
@@ -1108,13 +1190,15 @@ process.on('SIGTERM', async () => {
   serverLogger.info('SIGTERM received, shutting down gracefully');
 
   // Clean up AWS Transcribe sessions
-  try {
-    await awsTranscribeService.cleanup();
-    serverLogger.info('AWS Transcribe sessions cleaned up');
-  } catch (error: any) {
-    serverLogger.error('Error cleaning up AWS Transcribe', {
-      error: error.message,
-    });
+  if (awsTranscribeService) {
+    try {
+      await awsTranscribeService.cleanup();
+      serverLogger.info('AWS Transcribe sessions cleaned up');
+    } catch (error: any) {
+      serverLogger.error('Error cleaning up AWS Transcribe', {
+        error: error.message,
+      });
+    }
   }
 
   httpServer.close(() => {
@@ -1128,13 +1212,15 @@ process.on('SIGINT', async () => {
   serverLogger.info('SIGINT received, shutting down gracefully');
 
   // Clean up AWS Transcribe sessions
-  try {
-    await awsTranscribeService.cleanup();
-    serverLogger.info('AWS Transcribe sessions cleaned up');
-  } catch (error: any) {
-    serverLogger.error('Error cleaning up AWS Transcribe', {
-      error: error.message,
-    });
+  if (awsTranscribeService) {
+    try {
+      await awsTranscribeService.cleanup();
+      serverLogger.info('AWS Transcribe sessions cleaned up');
+    } catch (error: any) {
+      serverLogger.error('Error cleaning up AWS Transcribe', {
+        error: error.message,
+      });
+    }
   }
 
   httpServer.close(() => {
