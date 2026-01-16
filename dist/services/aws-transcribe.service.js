@@ -56,11 +56,12 @@ class AWSTranscribeService {
                 isActive: true,
                 retryCount: 0,
                 lastSpeaker: 'unknown',
+                streamStarted: false, // Don't start AWS stream until first audio chunk
             };
             this.activeSessions.set(sessionId, session);
-            // Start transcription
-            await this.startTranscription(session);
-            logger.info('Transcription session started', { sessionId });
+            // Don't start AWS Transcribe stream here - wait for first audio chunk
+            // This prevents premature close errors when no audio data is immediately available
+            logger.info('Transcription session created (stream will start on first audio)', { sessionId });
         }
         catch (error) {
             logger.error('Error starting session', {
@@ -88,6 +89,23 @@ class AWSTranscribeService {
             throw new Error(`Session ${sessionId} is not active`);
         }
         try {
+            // Start AWS Transcribe stream on first audio chunk (lazy initialization)
+            if (!session.streamStarted) {
+                session.streamStarted = true;
+                logger.info('Starting AWS Transcribe stream on first audio chunk', { sessionId });
+                // Start transcription in background (don't await to avoid blocking audio flow)
+                this.startTranscription(session).catch((error) => {
+                    logger.error('Failed to start transcription stream', {
+                        sessionId,
+                        error: error.message,
+                    });
+                    if (session.onError) {
+                        session.onError(error);
+                    }
+                });
+                // Give the stream a moment to initialize before writing
+                await new Promise(resolve => setTimeout(resolve, 100));
+            }
             // Write audio data to stream
             session.audioStream.write(audioData);
         }
@@ -144,15 +162,20 @@ class AWSTranscribeService {
             }
         }
         catch (error) {
-            // Check if this is a premature close error (expected when client disconnects)
+            // Check for expected/graceful errors that don't need retrying
             const isPrematureClose = error.code === 'ERR_STREAM_PREMATURE_CLOSE' ||
                 error.message?.includes('Premature close');
-            if (isPrematureClose) {
-                logger.warn('Transcription stream closed prematurely', {
+            const isDeserializationError = error.message?.includes('Deserialization error');
+            const isStreamClosed = !session.isActive;
+            if (isPrematureClose || isDeserializationError || isStreamClosed) {
+                logger.warn('Transcription stream ended (expected)', {
                     sessionId: session.sessionId,
-                    message: 'Client likely disconnected before sending audio',
+                    reason: isPrematureClose ? 'premature close' :
+                        isDeserializationError ? 'deserialization error (likely empty stream)' :
+                            'session closed',
+                    error: error.message,
                 });
-                // Clean up session without retrying
+                // Clean up session without retrying - these are architectural/expected errors
                 session.isActive = false;
                 this.activeSessions.delete(session.sessionId);
                 return;
@@ -163,7 +186,7 @@ class AWSTranscribeService {
                 code: error.code,
                 retryCount: session.retryCount,
             });
-            // Handle retry logic for non-premature-close errors
+            // Handle retry logic only for transient network errors
             if (session.retryCount < this.maxRetries && session.isActive) {
                 session.retryCount++;
                 logger.info('Retrying transcription', {
