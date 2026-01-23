@@ -13,6 +13,7 @@ const ai_analysis_service_1 = require("./services/ai-analysis.service");
 const conversation_service_1 = require("./services/conversation.service");
 const aws_transcribe_service_1 = require("./services/aws-transcribe.service");
 const client_ses_1 = require("@aws-sdk/client-ses");
+const ai_controller_1 = require("./controllers/ai.controller");
 // Load environment variables
 dotenv_1.default.config();
 const serverLogger = (0, logger_1.createLogger)('server');
@@ -27,6 +28,7 @@ for (const env of requiredEnv) {
 // Initialize services
 const aiAnalysisService = new ai_analysis_service_1.AIAnalysisService();
 const conversationService = new conversation_service_1.ConversationService();
+const aiController = new ai_controller_1.AIController();
 // AWS Transcribe is optional - only initialize if credentials are configured
 let awsTranscribeService = null;
 if (process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY) {
@@ -636,6 +638,16 @@ io.use((socket, next) => {
         next(new Error('Authentication failed'));
     }
 });
+// ============================================================================
+// AI GENERATION ENDPOINT (AWS SERVERLESS)
+// ============================================================================
+/**
+ * POST /api/ai/generate
+ *
+ * Secure endpoint for AI persona generation.
+ * Handles both Sales Coach and Customer Simulation.
+ */
+app.post('/api/ai/generate', (req, res) => aiController.generate(req, res));
 // Socket.io connection handler
 io.on('connection', (socket) => {
     serverLogger.info('Client connected', { socketId: socket.id });

@@ -7,7 +7,6 @@
     "dev": "tsx watch src/server.ts",
     "build": "tsc",
     "start": "node dist/server.js",
-    "postinstall": "npm run build",
     "start:dev": "tsx src/server.ts",
     "test": "vitest",
     "lint": "eslint src --ext .ts",
@@ -35,7 +34,6 @@
     "openai": "^4.28.0",
     "pg": "^8.11.3",
     "socket.io": "^4.6.1",
-    "typescript": "^5.3.3",
     "uuid": "^9.0.1",
     "winston": "^3.11.0"
   },
@@ -51,6 +49,7 @@
     "prettier": "^3.2.4",
     "socket.io-client": "^4.8.3",
     "tsx": "^4.7.0",
+    "typescript": "^5.3.3",
     "vitest": "^1.2.0"
   },
   "engines": {
