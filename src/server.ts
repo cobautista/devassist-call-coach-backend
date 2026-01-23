@@ -7,6 +7,8 @@ import { createLogger } from './utils/logger';
 import { AIAnalysisService } from './services/ai-analysis.service';
 import { ConversationService } from './services/conversation.service';
 import { AWSTranscribeService } from './services/aws-transcribe.service';
+import { SESClient, SendEmailCommand } from '@aws-sdk/client-ses';
+import { AIController } from './controllers/ai.controller';
 import type {
   StartConversationPayload,
   TranscriptPayload,
@@ -37,6 +39,7 @@ for (const env of requiredEnv) {
 // Initialize services
 const aiAnalysisService = new AIAnalysisService();
 const conversationService = new ConversationService();
+const aiController = new AIController();
 
 // AWS Transcribe is optional - only initialize if credentials are configured
 let awsTranscribeService: AWSTranscribeService | null = null;
@@ -75,6 +78,287 @@ app.get('/health', (_req, res) => {
     timestamp: Date.now(),
     activeConversations: conversationService.getActiveConversations().length,
   });
+});
+
+// ============================================================================
+// EMAIL REPORT ENDPOINT (AWS SES)
+// ============================================================================
+
+/**
+ * POST /api/generate-report
+ *
+ * Generates and sends a call diagnostics email report via AWS SES.
+ * The email includes call metadata, transcripts, and AI coaching tips.
+ *
+ * @body {Object} callMetadata - Call information (conversationId, agentEmail, etc.)
+ * @body {Array} transcripts - Array of transcript objects
+ * @body {Array} aiTips - Array of AI recommendation objects
+ * @returns {Object} { success: boolean, messageId?: string, error?: string }
+ */
+app.post('/api/generate-report', async (req, res) => {
+  try {
+    serverLogger.info('📧 [Email] Received email report request');
+
+    const { callMetadata, transcripts, aiTips, intelligence, entities } = req.body;
+
+    // Validate required fields
+    if (!callMetadata?.agentEmail || !callMetadata?.conversationId) {
+      serverLogger.warn('Bad request - missing required email fields');
+      return res.status(400).json({
+        success: false,
+        error: 'agentEmail and conversationId are required',
+      });
+    }
+
+    serverLogger.info('📧 [Email] Processing email report', {
+      conversationId: callMetadata.conversationId,
+      agentEmail: callMetadata.agentEmail,
+      transcriptCount: transcripts?.length || 0,
+      aiTipCount: aiTips?.length || 0,
+      hasIntelligence: !!intelligence,
+      hasEntities: !!entities,
+    });
+
+    // Format call duration
+    const durationMs = callMetadata.duration || (callMetadata.endTime - callMetadata.startTime);
+    const durationMinutes = Math.floor(durationMs / 60000);
+    const durationSeconds = Math.floor((durationMs % 60000) / 1000);
+    const durationStr = `${durationMinutes}m ${durationSeconds}s`;
+
+    // Format timestamps
+    const startTimeStr = new Date(callMetadata.startTime).toLocaleString('en-US', {
+      timeZone: 'America/New_York',
+      dateStyle: 'medium',
+      timeStyle: 'short',
+    });
+    const endTimeStr = new Date(callMetadata.endTime).toLocaleString('en-US', {
+      timeZone: 'America/New_York',
+      dateStyle: 'medium',
+      timeStyle: 'short',
+    });
+
+    // Build transcript HTML
+    const transcriptHtml = (transcripts || []).map((t: any) => {
+      const speaker = t.speaker === 'agent' ? '🎤 Agent' : '👤 Customer';
+      const time = new Date(t.timestamp).toLocaleTimeString('en-US', { timeStyle: 'short' });
+      return `
+        <div style="margin-bottom: 12px; padding: 10px; background: ${t.speaker === 'agent' ? '#e8f4fd' : '#f8f9fa'}; border-radius: 8px;">
+          <strong style="color: ${t.speaker === 'agent' ? '#1976d2' : '#666'};">${speaker}</strong>
+          <span style="color: #999; font-size: 12px; margin-left: 8px;">${time}</span>
+          <p style="margin: 8px 0 0 0; color: #333;">${t.text}</p>
+        </div>
+      `;
+    }).join('');
+
+    // Build AI tips HTML
+    const aiTipsHtml = (aiTips || []).map((tip: any) => {
+      const selectedLabel = tip.selectedOption && tip.options[tip.selectedOption - 1]
+        ? tip.options[tip.selectedOption - 1].label
+        : 'Not selected';
+      return `
+        <div style="margin-bottom: 16px; padding: 12px; background: #fff3e0; border-left: 4px solid #ff9800; border-radius: 4px;">
+          <strong style="color: #e65100;">💡 ${tip.heading}</strong>
+          <p style="margin: 8px 0; color: #666; font-size: 14px;">${tip.context}</p>
+          <p style="margin: 4px 0; color: #333;"><strong>Selected:</strong> ${selectedLabel}</p>
+        </div>
+      `;
+    }).join('');
+
+    // Build Intelligence HTML (Deepgram features)
+    let intelligenceHtml = '';
+    if (intelligence) {
+      const sentimentEmoji = intelligence.sentiment?.label === 'positive' ? '😊' : 
+                             intelligence.sentiment?.label === 'negative' ? '😟' : '😐';
+      const sentimentColor = intelligence.sentiment?.label === 'positive' ? '#4caf50' : 
+                              intelligence.sentiment?.label === 'negative' ? '#f44336' : '#9e9e9e';
+      const sentimentScore = intelligence.sentiment?.score ? Math.round(intelligence.sentiment.score * 100) : 0;
+
+      intelligenceHtml = `
+        <div style="background: #e3f2fd; padding: 16px; border-radius: 8px; margin-bottom: 24px;">
+          <h2 style="margin: 0 0 12px 0; font-size: 18px; color: #1565c0;">🧠 Conversation Intelligence</h2>
+          
+          <!-- Sentiment -->
+          <div style="margin-bottom: 12px;">
+            <strong>Sentiment:</strong> 
+            <span style="color: ${sentimentColor}; font-weight: bold;">${sentimentEmoji} ${intelligence.sentiment?.label?.toUpperCase() || 'N/A'}</span>
+            <span style="color: #666; margin-left: 8px;">(${sentimentScore}% confidence)</span>
+          </div>
+          
+          ${intelligence.intents?.length > 0 ? `
+          <!-- Intents -->
+          <div style="margin-bottom: 12px;">
+            <strong>Detected Intents:</strong>
+            <ul style="margin: 8px 0 0 0; padding-left: 20px;">
+              ${intelligence.intents.slice(0, 5).map((i: any) => `
+                <li style="color: #333;">
+                  <strong>${i.intent}</strong> 
+                  <span style="color: #666;">(${Math.round(i.confidence * 100)}%)</span>
+                  ${i.segment ? `<br><span style="color: #888; font-size: 12px; font-style: italic;">"${i.segment}"</span>` : ''}
+                </li>
+              `).join('')}
+            </ul>
+          </div>
+          ` : ''}
+          
+          ${intelligence.topics?.length > 0 ? `
+          <!-- Topics -->
+          <div style="margin-bottom: 12px;">
+            <strong>Topics Discussed:</strong>
+            <div style="margin-top: 8px;">
+              ${intelligence.topics.slice(0, 6).map((t: any) => `
+                <span style="display: inline-block; background: #bbdefb; color: #1565c0; padding: 4px 10px; margin: 4px 4px 4px 0; border-radius: 16px; font-size: 13px;">${t.topic} (${Math.round(t.confidence * 100)}%)</span>
+              `).join('')}
+            </div>
+          </div>
+          ` : ''}
+          
+          ${intelligence.summary ? `
+          <!-- Summary -->
+          <div style="background: white; padding: 12px; border-radius: 6px; margin-top: 12px;">
+            <strong>📝 Summary:</strong>
+            <p style="margin: 8px 0 0 0; color: #333; font-style: italic;">${intelligence.summary}</p>
+          </div>
+          ` : ''}
+        </div>
+      `;
+    }
+
+    // Build Entities HTML (Deepgram extraction)
+    let entitiesHtml = '';
+    if (entities) {
+      const hasAnyEntities = (entities.businessNames?.length || 0) + 
+                             (entities.people?.length || 0) + 
+                             (entities.locations?.length || 0) + 
+                             (entities.dates?.length || 0) + 
+                             (entities.contactInfo?.emails?.length || 0) + 
+                             (entities.contactInfo?.phoneNumbers?.length || 0) + 
+                             (entities.contactInfo?.urls?.length || 0) > 0;
+      
+      if (hasAnyEntities) {
+        entitiesHtml = `
+          <div style="background: #f3e5f5; padding: 16px; border-radius: 8px; margin-bottom: 24px;">
+            <h2 style="margin: 0 0 12px 0; font-size: 18px; color: #7b1fa2;">🎯 Extracted Entities</h2>
+            <table style="width: 100%; font-size: 14px;">
+              ${entities.businessNames?.length > 0 ? `<tr><td style="padding: 6px 0; color: #666; vertical-align: top; width: 120px;">🏢 Companies:</td><td style="padding: 6px 0;">${entities.businessNames.join(', ')}</td></tr>` : ''}
+              ${entities.people?.length > 0 ? `<tr><td style="padding: 6px 0; color: #666; vertical-align: top;">👤 People:</td><td style="padding: 6px 0;">${entities.people.join(', ')}</td></tr>` : ''}
+              ${entities.locations?.length > 0 ? `<tr><td style="padding: 6px 0; color: #666; vertical-align: top;">📍 Locations:</td><td style="padding: 6px 0;">${entities.locations.join(', ')}</td></tr>` : ''}
+              ${entities.dates?.length > 0 ? `<tr><td style="padding: 6px 0; color: #666; vertical-align: top;">📅 Dates:</td><td style="padding: 6px 0;">${entities.dates.join(', ')}</td></tr>` : ''}
+              ${entities.contactInfo?.emails?.length > 0 ? `<tr><td style="padding: 6px 0; color: #666; vertical-align: top;">📧 Emails:</td><td style="padding: 6px 0;">${entities.contactInfo.emails.join(', ')}</td></tr>` : ''}
+              ${entities.contactInfo?.phoneNumbers?.length > 0 ? `<tr><td style="padding: 6px 0; color: #666; vertical-align: top;">📞 Phone:</td><td style="padding: 6px 0;">${entities.contactInfo.phoneNumbers.join(', ')}</td></tr>` : ''}
+              ${entities.contactInfo?.urls?.length > 0 ? `<tr><td style="padding: 6px 0; color: #666; vertical-align: top;">🌐 URLs:</td><td style="padding: 6px 0;">${entities.contactInfo.urls.join(', ')}</td></tr>` : ''}
+            </table>
+          </div>
+        `;
+      }
+    }
+    // Build complete email HTML
+    const emailHtml = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+  <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 24px; border-radius: 12px 12px 0 0;">
+    <h1 style="color: white; margin: 0; font-size: 24px;">📞 Call Coaching Report</h1>
+    <p style="color: rgba(255,255,255,0.9); margin: 8px 0 0 0; font-size: 14px;">Simple.biz AI Coaching Session</p>
+  </div>
+  
+  <div style="background: white; padding: 24px; border: 1px solid #e0e0e0; border-top: none;">
+    <!-- Call Summary -->
+    <div style="background: #f5f5f5; padding: 16px; border-radius: 8px; margin-bottom: 24px;">
+      <h2 style="margin: 0 0 12px 0; font-size: 18px; color: #333;">📊 Call Summary</h2>
+      <table style="width: 100%; font-size: 14px;">
+        <tr><td style="padding: 4px 0; color: #666;">Conversation ID:</td><td style="padding: 4px 0;">${callMetadata.conversationId}</td></tr>
+        <tr><td style="padding: 4px 0; color: #666;">Duration:</td><td style="padding: 4px 0;"><strong>${durationStr}</strong></td></tr>
+        <tr><td style="padding: 4px 0; color: #666;">Started:</td><td style="padding: 4px 0;">${startTimeStr}</td></tr>
+        <tr><td style="padding: 4px 0; color: #666;">Ended:</td><td style="padding: 4px 0;">${endTimeStr}</td></tr>
+        ${callMetadata.customerPhone ? `<tr><td style="padding: 4px 0; color: #666;">Customer Phone:</td><td style="padding: 4px 0;">${callMetadata.customerPhone}</td></tr>` : ''}
+        ${callMetadata.customerName ? `<tr><td style="padding: 4px 0; color: #666;">Customer Name:</td><td style="padding: 4px 0;">${callMetadata.customerName}</td></tr>` : ''}
+      </table>
+    </div>
+    
+    ${intelligenceHtml}
+    
+    ${entitiesHtml}
+    
+    ${aiTipsHtml ? `
+    <!-- AI Coaching Tips -->
+    <div style="margin-bottom: 24px;">
+      <h2 style="margin: 0 0 12px 0; font-size: 18px; color: #333;">🤖 AI Coaching Tips (${aiTips?.length || 0})</h2>
+      ${aiTipsHtml}
+    </div>
+    ` : ''}
+    
+    <!-- Transcript -->
+    <div>
+      <h2 style="margin: 0 0 12px 0; font-size: 18px; color: #333;">📝 Call Transcript (${transcripts?.length || 0} messages)</h2>
+      ${transcriptHtml || '<p style="color: #999;">No transcript available</p>'}
+    </div>
+  </div>
+  
+  <div style="background: #f5f5f5; padding: 16px; border-radius: 0 0 12px 12px; text-align: center; font-size: 12px; color: #999;">
+    <p style="margin: 0;">Generated by Simple.biz AI Call Coach</p>
+    <p style="margin: 4px 0 0 0;">© 2026 Simple.biz • Powered by Deepgram & OpenAI</p>
+  </div>
+</body>
+</html>
+    `;
+
+    // Initialize SES Client
+    const sesClient = new SESClient({
+      region: process.env.AWS_REGION || 'us-east-1',
+    });
+
+    // Build recipient list
+    const toAddresses = [callMetadata.agentEmail];
+    const ccAddresses = callMetadata.ccEmails?.filter((e: string) => e && e.includes('@')) || [];
+
+    // Send email via AWS SES
+    const sendCommand = new SendEmailCommand({
+      Source: 'cobb@simple.biz', // Verified sender
+      Destination: {
+        ToAddresses: toAddresses,
+        CcAddresses: ccAddresses.length > 0 ? ccAddresses : undefined,
+      },
+      Message: {
+        Subject: {
+          Data: `📞 Call Coaching Report - ${durationStr} session`,
+          Charset: 'UTF-8',
+        },
+        Body: {
+          Html: {
+            Data: emailHtml,
+            Charset: 'UTF-8',
+          },
+        },
+      },
+    });
+
+    const result = await sesClient.send(sendCommand);
+
+    serverLogger.info('✅ [Email] Report sent successfully', {
+      messageId: result.MessageId,
+      to: toAddresses,
+      cc: ccAddresses,
+    });
+
+    return res.status(200).json({
+      success: true,
+      messageId: result.MessageId,
+    });
+
+  } catch (error: any) {
+    serverLogger.error('❌ [Email] Failed to send report', {
+      error: error.message,
+      stack: error.stack,
+    });
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to send email report',
+    });
+  }
 });
 
 // ============================================================================
@@ -150,9 +434,10 @@ app.post('/api/auth/deepgram-token', async (req, res) => {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        scopes: ['usage:write'], // Required for live streaming
-        // Optional: set custom expiration (default is 30 seconds)
-        // expires_in: 300 // 5 minutes
+        // REMOVED explicit scopes to inherit API Key defaults
+        // scopes: ['usage:write'], 
+        // expiration set to 60s
+        expires_in: 60 
       }),
     });
 
@@ -433,6 +718,19 @@ io.use((socket, next) => {
     next(new Error('Authentication failed'));
   }
 });
+
+// ============================================================================
+// AI GENERATION ENDPOINT (AWS SERVERLESS)
+// ============================================================================
+
+/**
+ * POST /api/ai/generate
+ * 
+ * Secure endpoint for AI persona generation.
+ * Handles both Sales Coach and Customer Simulation.
+ */
+app.post('/api/ai/generate', (req, res) => aiController.generate(req, res));
+
 
 // Socket.io connection handler
 io.on('connection', (socket: Socket) => {
