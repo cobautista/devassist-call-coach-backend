@@ -1,6 +1,6 @@
 import OpenAI from 'openai';
 import { v4 as uuidv4 } from 'uuid';
-import { createLogger } from '../utils/logger';
+
 import type {
   AITipPayload,
   ConversationStage,
@@ -8,8 +8,8 @@ import type {
   TranscriptSegment,
   RequestNextTipPayload,
 } from '../types';
-
-const logger = createLogger('ai-analysis');
+import { QUALITY_SCRIPTS } from '../constants/quality-scripts';
+import { logger } from '../utils/logger';
 
 /**
  * AI Analysis Service
@@ -49,32 +49,34 @@ export class AIAnalysisService {
       messages: [
         {
           role: 'system',
-          content: `You are Perry (or Agent), Bob Hansen's assistant at Simple.Biz. Goal: callback for Bob.
+          content: `You are Mk1 (or Agent), Bob Hansen's assistant at Simple.Biz.
+YOUR ONLY JOB IS TO SELECT A SCRIPT.
+You are FORBIDDEN from generating original text.
+You MUST select one valid object from the GOLDEN SCRIPTS LIBRARY below.
 
-FLOW:
-1.  **Intro:** "Hi, I'm [Name] from Simple. Bob Hansen and I are local web designers... interested in building or updating?"
-2.  **Logic:**
-    -   **Non-Engaging ("Not now"):** Rebuttal 1: "Is it because you have a site, or just busy?"
-        -   *If Busy:* "Sorry... mind if Bob calls later?" (Confirm Name + Authority + Topic)
-        -   *If Has Site:* "Great! We optimize too. Mind if Bob calls later?" (Confirm Name + Authority + Topic)
-    -   **Engaging (Asks Price/SEO/Hosting):**
-        -   *Assume Authority.* SKIP authority/topic checks.
-        -   *Response:* "That's a great question! I'm just Bob's assistant... mind if Bob calls later?" (Confirm Name ONLY)
+GOLDEN SCRIPTS LIBRARY:
+${JSON.stringify(QUALITY_SCRIPTS.filter(s => s.stage === 'GREETING'), null, 2)}
+
+INSTRUCTIONS:
+1. Identify the current conversation stage (likely GREETING).
+2. Select the SINGLE BEST SCRIPT from the library.
+3. Replace placeholders: [Agent Name] -> "Mark", [Location] -> "Sacramento", [Customer Name] -> Detect or "there".
+4. DO NOT PARAPHRASE. Use the exact "text" field from the library.
 
 Return ONLY valid JSON:
 {
   "heading": "2-word max heading",
-  "stage": "GREETING",
-  "context": "Start with the mandated Simple.Biz intro",
+  "stage": "Detected Stage",
+  "context": "Why this script fits",
   "options": [
-    { "label": "Standard", "script": "Hi this is [Name] from Simple. Bob Hansen and I are local web designers here in Middletown. We're just wondering if you're interested in talking to someone local about building or updating an existing website?" }
+    { "label": "Label from library", "script": "EXACT TEXT from library with placeholders filled" }
   ]
 }`,
         },
         { role: 'user', content: prompt },
       ],
-      temperature: 0.7,
-      max_tokens: 500,
+      temperature: 0.3, // Lower temperature for faster, more consistent results
+      max_tokens: 200, // Reduced for latency
     });
 
     const content = completion.choices[0]?.message?.content;
@@ -147,40 +149,40 @@ Return ONLY valid JSON:
       messages: [
         {
           role: 'system',
-          content: `You are Perry (or Agent), Bob Hansen's assistant at Simple.Biz. Goal: callback for Bob.
+          content: `You are Mk1 (or Agent), Bob Hansen's assistant at Simple.Biz.
+YOUR ONLY JOB IS TO SELECT A SCRIPT.
+You are FORBIDDEN from generating original text.
+You MUST select one valid object from the GOLDEN SCRIPTS LIBRARY below.
 
-SCENARIO LOGIC:
-1.  **NON-ENGAGING ("Not right now" / "Not interested")**
-    -   *Move 1:* Ask "Is it because you have a site, or just busy?"
-    -   *If "Busy":* "Sorry I caught you at a bad time. Mind if Bob calls later today?"
-    -   *If "Have site":* "Great! We don't just build, we optimize. Mind if Bob calls later?"
-    -   *Required Qualifications:* 1. Confirm Callback 2. Confirm Name 3. Confirm Authority (He/She in charge?) 4. Confirm Topic (Build vs Update).
+GOLDEN SCRIPTS LIBRARY:
+${JSON.stringify(QUALITY_SCRIPTS, null, 2)}
 
-2.  **ENGAGING (Asks about SEO, Price, Hosting, etc.)**
-    -   *Crucial:* DO NOT check authority. DO NOT check topic. Lead is already qualified.
-    -   *Move:* "Great question! I'm just Bob's assistant... mind if Bob calls later to discuss [Topic]?"
-    -   *Required Qualifications:* 1. Confirm Callback 2. Confirm Name.
-    -   *Close:* "Great! Last question, may I know who I'm speaking with?"
+INSTRUCTIONS:
+1. Analyze the conversation history and the user's latest input.
+2. Determine the current Conversation Stage (GREETING, VALUE_PROP, OBJECTION_HANDLING, CLOSING, CONVERSION).
+3. Select the SINGLE BEST SCRIPT from the library that matches the context.
+4. FILL PLACEHOLDERS ONLY: [Agent Name] -> "Mark", [Location] -> "Sacramento", [Customer Name] -> Detect or "there".
+5. DO NOT PARAPHRASE. Use the exact "text" field from the library.
 
-3.  **GENERAL**
-    -   3-Strikes Rule: Stop after 2 hard "No"s.
-    -   Never say "I understand" or "I see".
+CRITICAL OVERRIDE:
+The user's GOAL is to make the customer agree for a callback from Bob.
+Unless the customer is completely rejecting, you MUST prioritize scripts involved with CLOSING or OBJECTION_HANDLING that lead to the "Ask for Call" (id: 'ask-callback') script.
+If the conversation is in a neutral or positive state, suggest 'ask-callback'.
 
 Return ONLY valid JSON:
 {
-  "heading": "2-word max heading",
-  "stage": "DISCOVERY" | "VALUE_PROP" | "REBUTTAL" | "CLOSING",
-  "context": "Context based on Engaging vs Non-Engaging path",
+  "heading": "2-word max heading (e.g. 'Handle Objection')",
+  "stage": "Detected Stage",
+  "context": "Why this specific script was selected based on the last user message",
   "options": [
-    { "label": "Script Option", "script": "Exact words to say" },
-    { "label": "Alternative", "script": "Exact words to say" }
+    { "label": "Label from library", "script": "EXACT TEXT from library with placeholders filled" }
   ]
 }`,
         },
         { role: 'user', content: prompt },
       ],
-      temperature: 0.6, // Lower temperature for strict script adherence
-      max_tokens: 600,
+      temperature: 0.4, // Lowered for consistency
+      max_tokens: 250, // Reduced for latency
     });
 
     const content = completion.choices[0]?.message?.content;
@@ -233,7 +235,76 @@ Return ONLY valid JSON:
   }
 
   /**
+   * Generate an alternative tip (Strict Golden Script cycling)
+   * Used when user clicks "Next Tip" / "Cycle"
+   * STRICTLY selects a different script from the Quality Library
+   */
+  async generateAlternativeTip(
+    conversationId: string,
+    currentStage: ConversationStage,
+    currentScriptId?: string
+  ): Promise<AITipPayload> {
+    logger.info('Generating alternative tip', { conversationId, currentStage, currentScriptId });
+
+    const completion = await this.openai.chat.completions.create({
+      model: 'gpt-4o-mini',
+      messages: [
+        {
+          role: 'system',
+          content: `You are Mk1. YOUR ONLY JOB IS TO SELECT A DIFFERENT SCRIPT.
+You are FORBIDDEN from generating original text.
+You MUST select one valid object from the GOLDEN SCRIPTS LIBRARY below.
+
+GOLDEN SCRIPTS LIBRARY:
+${JSON.stringify(
+  QUALITY_SCRIPTS.filter((s) => s.stage === currentStage),
+  null,
+  2
+)}
+
+INSTRUCTIONS:
+1. Review the "GOLDEN SCRIPTS LIBRARY" for the stage: "${currentStage}".
+2. Select a script that is DIFFERENT from the current script ID: "${currentScriptId || 'none'}".
+3. If no other script exists for this stage, return the same one but acknowledge it's the best fit.
+4. Replace placeholders: [Agent Name] -> "Mark", [Location] -> "Sacramento", [Customer Name] -> Detect or "there".
+5. DO NOT PARAPHRASE. Use the exact "text" field.
+
+Return ONLY valid JSON:
+{
+  "heading": "Alternative Option",
+  "stage": "${currentStage}",
+  "context": "Why this alternative approach might work better",
+  "options": [
+    { "label": "Label from library", "script": "EXACT TEXT from library", "id": "id from library" }
+  ]
+}`,
+        },
+        { role: 'user', content: `Give me an alternative script for stage: ${currentStage}` },
+      ],
+      temperature: 0.2, // Low temp for strict selection
+      max_tokens: 250,
+    });
+
+    const content = completion.choices[0]?.message?.content;
+    if (!content) throw new Error('No response from OpenAI');
+
+    const cleanedContent = this.cleanJsonResponse(content);
+    const parsed = JSON.parse(cleanedContent);
+
+    return {
+      recommendationId: uuidv4(),
+      conversationId,
+      stage: parsed.stage as ConversationStage,
+      heading: parsed.heading,
+      context: parsed.context,
+      options: parsed.options as DialogueOption[],
+      timestamp: Date.now(),
+    };
+  }
+
+  /**
    * Build greeting prompt (simple context)
+   *
    */
   private buildGreetingPrompt(transcriptHistory: TranscriptSegment[]): string {
     const recentTranscripts = transcriptHistory.slice(-5);
@@ -241,15 +312,15 @@ Return ONLY valid JSON:
       .map((t) => `${t.speaker.toUpperCase()}: ${t.text}`)
       .join('\n');
 
-    return `The agent is starting a sales call. Based on the conversation so far, generate a greeting recommendation.
+    return `The agent is starting a sales call. Based on the conversation so far, generate a single, high-impact greeting recommendation.
 
 Recent conversation:
 ${conversationSummary || 'No conversation yet - this is the very beginning'}
 
-Generate a 2-word heading and 3 greeting options that:
-1. Build rapport naturally
-2. Set a consultative tone
-3. Open the door for discovery
+Generate a 2-word heading and 1 greeting option that:
+1. Builds rapport naturally
+2. Sets a consultative tone
+3. Opens the door for discovery
 
 Focus on keeping the conversation flowing, not pushing for immediate commitment.`;
   }
@@ -289,20 +360,15 @@ Customer responded: "${customerReaction.text}"
 ANALYSIS NEEDED: What does this reveal about customer's mindset? Are they interested, skeptical, ready to move forward, or pushing back?`;
     }
 
-    return `You are analyzing a sales conversation in real-time. The agent selected a coaching option, and we captured what actually happened next.
+    return `You are Mk1, analyzing a sales conversation in real-time. The agent selected a coaching option, and we captured what actually happened next.
 
 ## Conversation History (Last 10 exchanges)
 ${conversationSummary}
 ${analysisSection}
 
 ## Your Task
-Based on the ACTUAL conversation flow (not just the suggestion), generate the next coaching recommendation that:
-1. Acknowledges what actually happened (not what was suggested)
-2. Builds on the customer's real reaction
-3. Moves the conversation forward naturally
-4. Provides 3 options: Minimal (brief), Explanative (detailed), Contextual (highly adaptive)
-
-Generate a 2-word heading that captures the key move to make next.`;
+Based on the ACTUAL conversation flow (not just the suggestion), generate the SINGLE best next recommendation.
+`;
   }
 
   /**
@@ -320,28 +386,30 @@ Generate a 2-word heading that captures the key move to make next.`;
       .map((t) => `${t.speaker.toUpperCase()}: ${t.text}`)
       .join('\n');
 
-    const prompt = `Analyze this sales conversation and provide the next coaching recommendation.
+    const prompt = `Analyze this sales conversation and provide the next best coaching recommendation.
 
 Recent conversation:
 ${conversationSummary}
 
-Generate a 2-word heading and 3 coaching options that help move the conversation forward naturally.`;
+Generate a 2-word heading and 1 high-quality coaching option that moves the conversation forward naturally.`;
 
     const completion = await this.openai.chat.completions.create({
       model: 'gpt-4o-mini',
       messages: [
         {
           role: 'system',
-          content: `You are Perry, Bob Hansen's assistant at Simple.Biz.
+          content: `You are Mk1, Bob Hansen's assistant at Simple.Biz.
+MUST USE GOLDEN SCRIPTS from the library below. Do not generate custom text.
+Match the conversation stage to the best script.
 
-LOGIC:
-1.  **NON-ENGAGING:**
-    -   If "Busy" -> "Mind if Bob calls later?"
-    -   If "Has Site" -> "We optimize too. Mind if Bob calls later?"
-    -   *Must confirm:* Callback, Name, Authority, Topic.
-2.  **ENGAGING (Questions):**
-    -   "I'm just the assistant... mind if Bob calls later?"
-    -   *Must confirm:* Callback, Name. (SKIP Authority/Topic).
+GOLDEN SCRIPTS LIBRARY:
+${JSON.stringify(QUALITY_SCRIPTS, null, 2)}
+
+INSTRUCTIONS:
+1. Identify the current conversation stage and context.
+2. Select the ONE best script from the library.
+3. Replace placeholders: [Agent Name] -> "Mark", [Location] -> "Sacramento/Roseville", [Customer Name] -> Detect or "there".
+4. Determine stage from: GREETING, VALUE_PROP, OBJECTION_HANDLING, CLOSING, CONVERSION, NEXT_STEPS.
 
 Return ONLY valid JSON:
 {
@@ -349,15 +417,14 @@ Return ONLY valid JSON:
   "stage": "DISCOVERY" | "VALUE_PROP" | "REBUTTAL" | "CLOSING",
   "context": "Context",
   "options": [
-    { "label": "Option 1", "script": "Script 1" },
-    { "label": "Option 2", "script": "Script 2" }
+    { "label": "Best Suggestion", "script": "Script 1" }
   ]
 }`,
         },
         { role: 'user', content: prompt },
       ],
-      temperature: 0.7,
-      max_tokens: 500,
+      temperature: 0.5,
+      max_tokens: 150,
     });
 
     const content = completion.choices[0]?.message?.content;

@@ -6,8 +6,8 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.AIAnalysisService = void 0;
 const openai_1 = __importDefault(require("openai"));
 const uuid_1 = require("uuid");
+const quality_scripts_1 = require("../constants/quality-scripts");
 const logger_1 = require("../utils/logger");
-const logger = (0, logger_1.createLogger)('ai-analysis');
 /**
  * AI Analysis Service
  *
@@ -24,46 +24,48 @@ class AIAnalysisService {
             throw new Error('OPENAI_API_KEY environment variable is required');
         }
         this.openai = new openai_1.default({ apiKey });
-        logger.info('AI Analysis Service initialized');
+        logger_1.logger.info('AI Analysis Service initialized');
     }
     /**
      * Generate first greeting tip (fast, low-context)
      * Used after 3-minute warmup or in auto mode
      */
     async generateGreetingTip(conversationId, transcriptHistory) {
-        logger.info('Generating greeting tip', { conversationId, transcriptCount: transcriptHistory.length });
+        logger_1.logger.info('Generating greeting tip', { conversationId, transcriptCount: transcriptHistory.length });
         const prompt = this.buildGreetingPrompt(transcriptHistory);
         const completion = await this.openai.chat.completions.create({
             model: 'gpt-4o-mini',
             messages: [
                 {
                     role: 'system',
-                    content: `You are Perry (or Agent), Bob Hansen's assistant at Simple.Biz. Goal: callback for Bob.
+                    content: `You are Mk1 (or Agent), Bob Hansen's assistant at Simple.Biz.
+YOUR ONLY JOB IS TO SELECT A SCRIPT.
+You are FORBIDDEN from generating original text.
+You MUST select one valid object from the GOLDEN SCRIPTS LIBRARY below.
 
-FLOW:
-1.  **Intro:** "Hi, I'm [Name] from Simple. Bob Hansen and I are local web designers... interested in building or updating?"
-2.  **Logic:**
-    -   **Non-Engaging ("Not now"):** Rebuttal 1: "Is it because you have a site, or just busy?"
-        -   *If Busy:* "Sorry... mind if Bob calls later?" (Confirm Name + Authority + Topic)
-        -   *If Has Site:* "Great! We optimize too. Mind if Bob calls later?" (Confirm Name + Authority + Topic)
-    -   **Engaging (Asks Price/SEO/Hosting):**
-        -   *Assume Authority.* SKIP authority/topic checks.
-        -   *Response:* "That's a great question! I'm just Bob's assistant... mind if Bob calls later?" (Confirm Name ONLY)
+GOLDEN SCRIPTS LIBRARY:
+${JSON.stringify(quality_scripts_1.QUALITY_SCRIPTS.filter(s => s.stage === 'GREETING'), null, 2)}
+
+INSTRUCTIONS:
+1. Identify the current conversation stage (likely GREETING).
+2. Select the SINGLE BEST SCRIPT from the library.
+3. Replace placeholders: [Agent Name] -> "Mark", [Location] -> "Sacramento", [Customer Name] -> Detect or "there".
+4. DO NOT PARAPHRASE. Use the exact "text" field from the library.
 
 Return ONLY valid JSON:
 {
   "heading": "2-word max heading",
-  "stage": "GREETING",
-  "context": "Start with the mandated Simple.Biz intro",
+  "stage": "Detected Stage",
+  "context": "Why this script fits",
   "options": [
-    { "label": "Standard", "script": "Hi this is [Name] from Simple. Bob Hansen and I are local web designers here in Middletown. We're just wondering if you're interested in talking to someone local about building or updating an existing website?" }
+    { "label": "Label from library", "script": "EXACT TEXT from library with placeholders filled" }
   ]
 }`,
                 },
                 { role: 'user', content: prompt },
             ],
-            temperature: 0.7,
-            max_tokens: 500,
+            temperature: 0.3, // Lower temperature for faster, more consistent results
+            max_tokens: 200, // Reduced for latency
         });
         const content = completion.choices[0]?.message?.content;
         if (!content) {
@@ -76,24 +78,24 @@ Return ONLY valid JSON:
             parsed = JSON.parse(cleanedContent);
             // Validate required fields
             if (!parsed.options || !Array.isArray(parsed.options) || parsed.options.length === 0) {
-                logger.error('Invalid options array in AI response', { options: parsed.options });
+                logger_1.logger.error('Invalid options array in AI response', { options: parsed.options });
                 throw new Error('AI response missing valid options array');
             }
             // Validate each option has required fields
             for (const option of parsed.options) {
                 if (!option.label || !option.script) {
-                    logger.error('Invalid option in AI response', { option });
+                    logger_1.logger.error('Invalid option in AI response', { option });
                     throw new Error('AI response has option missing label or script');
                 }
             }
-            logger.info('Successfully parsed greeting tip', {
+            logger_1.logger.info('Successfully parsed greeting tip', {
                 heading: parsed.heading,
                 optionCount: parsed.options.length,
                 scriptLengths: parsed.options.map((o) => o.script?.length || 0),
             });
         }
         catch (error) {
-            logger.error('Failed to parse greeting tip response', {
+            logger_1.logger.error('Failed to parse greeting tip response', {
                 error: error.message,
                 rawContent: content,
             });
@@ -115,7 +117,7 @@ Return ONLY valid JSON:
      * Considers customer reaction to adapt coaching
      */
     async generateContextualTip(payload) {
-        logger.info('Generating contextual tip', {
+        logger_1.logger.info('Generating contextual tip', {
             conversationId: payload.conversationId,
             selectedOption: payload.selectedOption,
             hasAgentResponse: !!payload.agentResponse,
@@ -128,40 +130,40 @@ Return ONLY valid JSON:
             messages: [
                 {
                     role: 'system',
-                    content: `You are Perry (or Agent), Bob Hansen's assistant at Simple.Biz. Goal: callback for Bob.
+                    content: `You are Mk1 (or Agent), Bob Hansen's assistant at Simple.Biz.
+YOUR ONLY JOB IS TO SELECT A SCRIPT.
+You are FORBIDDEN from generating original text.
+You MUST select one valid object from the GOLDEN SCRIPTS LIBRARY below.
 
-SCENARIO LOGIC:
-1.  **NON-ENGAGING ("Not right now" / "Not interested")**
-    -   *Move 1:* Ask "Is it because you have a site, or just busy?"
-    -   *If "Busy":* "Sorry I caught you at a bad time. Mind if Bob calls later today?"
-    -   *If "Have site":* "Great! We don't just build, we optimize. Mind if Bob calls later?"
-    -   *Required Qualifications:* 1. Confirm Callback 2. Confirm Name 3. Confirm Authority (He/She in charge?) 4. Confirm Topic (Build vs Update).
+GOLDEN SCRIPTS LIBRARY:
+${JSON.stringify(quality_scripts_1.QUALITY_SCRIPTS, null, 2)}
 
-2.  **ENGAGING (Asks about SEO, Price, Hosting, etc.)**
-    -   *Crucial:* DO NOT check authority. DO NOT check topic. Lead is already qualified.
-    -   *Move:* "Great question! I'm just Bob's assistant... mind if Bob calls later to discuss [Topic]?"
-    -   *Required Qualifications:* 1. Confirm Callback 2. Confirm Name.
-    -   *Close:* "Great! Last question, may I know who I'm speaking with?"
+INSTRUCTIONS:
+1. Analyze the conversation history and the user's latest input.
+2. Determine the current Conversation Stage (GREETING, VALUE_PROP, OBJECTION_HANDLING, CLOSING, CONVERSION).
+3. Select the SINGLE BEST SCRIPT from the library that matches the context.
+4. FILL PLACEHOLDERS ONLY: [Agent Name] -> "Mark", [Location] -> "Sacramento", [Customer Name] -> Detect or "there".
+5. DO NOT PARAPHRASE. Use the exact "text" field from the library.
 
-3.  **GENERAL**
-    -   3-Strikes Rule: Stop after 2 hard "No"s.
-    -   Never say "I understand" or "I see".
+CRITICAL OVERRIDE:
+The user's GOAL is to make the customer agree for a callback from Bob.
+Unless the customer is completely rejecting, you MUST prioritize scripts involved with CLOSING or OBJECTION_HANDLING that lead to the "Ask for Call" (id: 'ask-callback') script.
+If the conversation is in a neutral or positive state, suggest 'ask-callback'.
 
 Return ONLY valid JSON:
 {
-  "heading": "2-word max heading",
-  "stage": "DISCOVERY" | "VALUE_PROP" | "REBUTTAL" | "CLOSING",
-  "context": "Context based on Engaging vs Non-Engaging path",
+  "heading": "2-word max heading (e.g. 'Handle Objection')",
+  "stage": "Detected Stage",
+  "context": "Why this specific script was selected based on the last user message",
   "options": [
-    { "label": "Script Option", "script": "Exact words to say" },
-    { "label": "Alternative", "script": "Exact words to say" }
+    { "label": "Label from library", "script": "EXACT TEXT from library with placeholders filled" }
   ]
 }`,
                 },
                 { role: 'user', content: prompt },
             ],
-            temperature: 0.6, // Lower temperature for strict script adherence
-            max_tokens: 600,
+            temperature: 0.4, // Lowered for consistency
+            max_tokens: 250, // Reduced for latency
         });
         const content = completion.choices[0]?.message?.content;
         if (!content) {
@@ -174,24 +176,24 @@ Return ONLY valid JSON:
             parsed = JSON.parse(cleanedContent);
             // Validate required fields
             if (!parsed.options || !Array.isArray(parsed.options) || parsed.options.length === 0) {
-                logger.error('Invalid options array in AI response', { options: parsed.options });
+                logger_1.logger.error('Invalid options array in AI response', { options: parsed.options });
                 throw new Error('AI response missing valid options array');
             }
             // Validate each option has required fields
             for (const option of parsed.options) {
                 if (!option.label || !option.script) {
-                    logger.error('Invalid option in AI response', { option });
+                    logger_1.logger.error('Invalid option in AI response', { option });
                     throw new Error('AI response has option missing label or script');
                 }
             }
-            logger.info('Successfully parsed contextual tip', {
+            logger_1.logger.info('Successfully parsed contextual tip', {
                 heading: parsed.heading,
                 optionCount: parsed.options.length,
                 scriptLengths: parsed.options.map((o) => o.script?.length || 0),
             });
         }
         catch (error) {
-            logger.error('Failed to parse contextual tip response', {
+            logger_1.logger.error('Failed to parse contextual tip response', {
                 error: error.message,
                 rawContent: content,
             });
@@ -208,22 +210,79 @@ Return ONLY valid JSON:
         };
     }
     /**
+     * Generate an alternative tip (Strict Golden Script cycling)
+     * Used when user clicks "Next Tip" / "Cycle"
+     * STRICTLY selects a different script from the Quality Library
+     */
+    async generateAlternativeTip(conversationId, currentStage, currentScriptId) {
+        logger_1.logger.info('Generating alternative tip', { conversationId, currentStage, currentScriptId });
+        const completion = await this.openai.chat.completions.create({
+            model: 'gpt-4o-mini',
+            messages: [
+                {
+                    role: 'system',
+                    content: `You are Mk1. YOUR ONLY JOB IS TO SELECT A DIFFERENT SCRIPT.
+You are FORBIDDEN from generating original text.
+You MUST select one valid object from the GOLDEN SCRIPTS LIBRARY below.
+
+GOLDEN SCRIPTS LIBRARY:
+${JSON.stringify(quality_scripts_1.QUALITY_SCRIPTS.filter((s) => s.stage === currentStage), null, 2)}
+
+INSTRUCTIONS:
+1. Review the "GOLDEN SCRIPTS LIBRARY" for the stage: "${currentStage}".
+2. Select a script that is DIFFERENT from the current script ID: "${currentScriptId || 'none'}".
+3. If no other script exists for this stage, return the same one but acknowledge it's the best fit.
+4. Replace placeholders: [Agent Name] -> "Mark", [Location] -> "Sacramento", [Customer Name] -> Detect or "there".
+5. DO NOT PARAPHRASE. Use the exact "text" field.
+
+Return ONLY valid JSON:
+{
+  "heading": "Alternative Option",
+  "stage": "${currentStage}",
+  "context": "Why this alternative approach might work better",
+  "options": [
+    { "label": "Label from library", "script": "EXACT TEXT from library", "id": "id from library" }
+  ]
+}`,
+                },
+                { role: 'user', content: `Give me an alternative script for stage: ${currentStage}` },
+            ],
+            temperature: 0.2, // Low temp for strict selection
+            max_tokens: 250,
+        });
+        const content = completion.choices[0]?.message?.content;
+        if (!content)
+            throw new Error('No response from OpenAI');
+        const cleanedContent = this.cleanJsonResponse(content);
+        const parsed = JSON.parse(cleanedContent);
+        return {
+            recommendationId: (0, uuid_1.v4)(),
+            conversationId,
+            stage: parsed.stage,
+            heading: parsed.heading,
+            context: parsed.context,
+            options: parsed.options,
+            timestamp: Date.now(),
+        };
+    }
+    /**
      * Build greeting prompt (simple context)
+     *
      */
     buildGreetingPrompt(transcriptHistory) {
         const recentTranscripts = transcriptHistory.slice(-5);
         const conversationSummary = recentTranscripts
             .map((t) => `${t.speaker.toUpperCase()}: ${t.text}`)
             .join('\n');
-        return `The agent is starting a sales call. Based on the conversation so far, generate a greeting recommendation.
+        return `The agent is starting a sales call. Based on the conversation so far, generate a single, high-impact greeting recommendation.
 
 Recent conversation:
 ${conversationSummary || 'No conversation yet - this is the very beginning'}
 
-Generate a 2-word heading and 3 greeting options that:
-1. Build rapport naturally
-2. Set a consultative tone
-3. Open the door for discovery
+Generate a 2-word heading and 1 greeting option that:
+1. Builds rapport naturally
+2. Sets a consultative tone
+3. Opens the door for discovery
 
 Focus on keeping the conversation flowing, not pushing for immediate commitment.`;
     }
@@ -252,52 +311,49 @@ Customer responded: "${customerReaction.text}"
 
 ANALYSIS NEEDED: What does this reveal about customer's mindset? Are they interested, skeptical, ready to move forward, or pushing back?`;
         }
-        return `You are analyzing a sales conversation in real-time. The agent selected a coaching option, and we captured what actually happened next.
+        return `You are Mk1, analyzing a sales conversation in real-time. The agent selected a coaching option, and we captured what actually happened next.
 
 ## Conversation History (Last 10 exchanges)
 ${conversationSummary}
 ${analysisSection}
 
 ## Your Task
-Based on the ACTUAL conversation flow (not just the suggestion), generate the next coaching recommendation that:
-1. Acknowledges what actually happened (not what was suggested)
-2. Builds on the customer's real reaction
-3. Moves the conversation forward naturally
-4. Provides 3 options: Minimal (brief), Explanative (detailed), Contextual (highly adaptive)
-
-Generate a 2-word heading that captures the key move to make next.`;
+Based on the ACTUAL conversation flow (not just the suggestion), generate the SINGLE best next recommendation.
+`;
     }
     /**
      * Generate periodic tip (auto mode - every 30 seconds)
      */
     async generatePeriodicTip(conversationId, transcriptHistory) {
-        logger.info('Generating periodic tip', { conversationId, transcriptCount: transcriptHistory.length });
+        logger_1.logger.info('Generating periodic tip', { conversationId, transcriptCount: transcriptHistory.length });
         // Use simpler prompt for auto mode
         const recentTranscripts = transcriptHistory.slice(-10);
         const conversationSummary = recentTranscripts
             .map((t) => `${t.speaker.toUpperCase()}: ${t.text}`)
             .join('\n');
-        const prompt = `Analyze this sales conversation and provide the next coaching recommendation.
+        const prompt = `Analyze this sales conversation and provide the next best coaching recommendation.
 
 Recent conversation:
 ${conversationSummary}
 
-Generate a 2-word heading and 3 coaching options that help move the conversation forward naturally.`;
+Generate a 2-word heading and 1 high-quality coaching option that moves the conversation forward naturally.`;
         const completion = await this.openai.chat.completions.create({
             model: 'gpt-4o-mini',
             messages: [
                 {
                     role: 'system',
-                    content: `You are Perry, Bob Hansen's assistant at Simple.Biz.
+                    content: `You are Mk1, Bob Hansen's assistant at Simple.Biz.
+MUST USE GOLDEN SCRIPTS from the library below. Do not generate custom text.
+Match the conversation stage to the best script.
 
-LOGIC:
-1.  **NON-ENGAGING:**
-    -   If "Busy" -> "Mind if Bob calls later?"
-    -   If "Has Site" -> "We optimize too. Mind if Bob calls later?"
-    -   *Must confirm:* Callback, Name, Authority, Topic.
-2.  **ENGAGING (Questions):**
-    -   "I'm just the assistant... mind if Bob calls later?"
-    -   *Must confirm:* Callback, Name. (SKIP Authority/Topic).
+GOLDEN SCRIPTS LIBRARY:
+${JSON.stringify(quality_scripts_1.QUALITY_SCRIPTS, null, 2)}
+
+INSTRUCTIONS:
+1. Identify the current conversation stage and context.
+2. Select the ONE best script from the library.
+3. Replace placeholders: [Agent Name] -> "Mark", [Location] -> "Sacramento/Roseville", [Customer Name] -> Detect or "there".
+4. Determine stage from: GREETING, VALUE_PROP, OBJECTION_HANDLING, CLOSING, CONVERSION, NEXT_STEPS.
 
 Return ONLY valid JSON:
 {
@@ -305,15 +361,14 @@ Return ONLY valid JSON:
   "stage": "DISCOVERY" | "VALUE_PROP" | "REBUTTAL" | "CLOSING",
   "context": "Context",
   "options": [
-    { "label": "Option 1", "script": "Script 1" },
-    { "label": "Option 2", "script": "Script 2" }
+    { "label": "Best Suggestion", "script": "Script 1" }
   ]
 }`,
                 },
                 { role: 'user', content: prompt },
             ],
-            temperature: 0.7,
-            max_tokens: 500,
+            temperature: 0.5,
+            max_tokens: 150,
         });
         const content = completion.choices[0]?.message?.content;
         if (!content) {
@@ -326,24 +381,24 @@ Return ONLY valid JSON:
             parsed = JSON.parse(cleanedContent);
             // Validate required fields
             if (!parsed.options || !Array.isArray(parsed.options) || parsed.options.length === 0) {
-                logger.error('Invalid options array in AI response', { options: parsed.options });
+                logger_1.logger.error('Invalid options array in AI response', { options: parsed.options });
                 throw new Error('AI response missing valid options array');
             }
             // Validate each option has required fields
             for (const option of parsed.options) {
                 if (!option.label || !option.script) {
-                    logger.error('Invalid option in AI response', { option });
+                    logger_1.logger.error('Invalid option in AI response', { option });
                     throw new Error('AI response has option missing label or script');
                 }
             }
-            logger.info('Successfully parsed periodic tip', {
+            logger_1.logger.info('Successfully parsed periodic tip', {
                 heading: parsed.heading,
                 optionCount: parsed.options.length,
                 scriptLengths: parsed.options.map((o) => o.script?.length || 0),
             });
         }
         catch (error) {
-            logger.error('Failed to parse periodic tip response', {
+            logger_1.logger.error('Failed to parse periodic tip response', {
                 error: error.message,
                 rawContent: content,
             });

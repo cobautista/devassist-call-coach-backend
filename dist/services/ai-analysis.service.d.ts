@@ -1,4 +1,4 @@
-import type { AITipPayload, TranscriptSegment, RequestNextTipPayload } from '../types';
+import type { AITipPayload, ConversationStage, TranscriptSegment, RequestNextTipPayload } from '../types';
 /**
  * AI Analysis Service
  *
@@ -22,7 +22,14 @@ export declare class AIAnalysisService {
      */
     generateContextualTip(payload: RequestNextTipPayload): Promise<AITipPayload>;
     /**
+     * Generate an alternative tip (Strict Golden Script cycling)
+     * Used when user clicks "Next Tip" / "Cycle"
+     * STRICTLY selects a different script from the Quality Library
+     */
+    generateAlternativeTip(conversationId: string, currentStage: ConversationStage, currentScriptId?: string): Promise<AITipPayload>;
+    /**
      * Build greeting prompt (simple context)
+     *
      */
     private buildGreetingPrompt;
     /**

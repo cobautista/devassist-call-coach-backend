@@ -61,13 +61,29 @@ const app = express();
 const httpServer = createServer(app);
 
 // CORS configuration
-const corsOrigin = process.env.CORS_ORIGIN?.split(',') || ['http://localhost:5173'];
-app.use(
-  cors({
-    origin: corsOrigin,
-    credentials: true,
-  })
-);
+// CORS configuration
+// Allow any Chrome Extension and local development
+const corsConfiguration = {
+  origin: function (origin: string | undefined, callback: (err: Error | null, allow?: boolean | string) => void) {
+    if (!origin) return callback(null, true);
+    
+    if (
+      origin.startsWith('chrome-extension://') || 
+      origin.includes('localhost') || 
+      origin === 'http://127.0.0.1:3000'
+    ) {
+      callback(null, true);
+    } else {
+      serverLogger.warn(`Blocked CORS for origin: ${origin}`);
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'OPTIONS', 'PUT', 'PATCH', 'DELETE'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin', 'x-api-key']
+};
+
+app.use(cors(corsConfiguration));
 
 app.use(express.json());
 
@@ -700,10 +716,7 @@ app.post('/api/transcribe/end', async (req, res) => {
 
 // Socket.io server
 const io = new Server(httpServer, {
-  cors: {
-    origin: corsOrigin,
-    credentials: true,
-  },
+  cors: corsConfiguration,
   transports: ['websocket', 'polling'],
 });
 
@@ -1150,6 +1163,51 @@ io.on('connection', (socket: Socket) => {
   });
 
   // ========================================================================
+  // REQUEST_ALTERNATIVE_TIP - Strict Script Cycling
+  // ========================================================================
+  socket.on('REQUEST_ALTERNATIVE_TIP', async (payload: { conversationId: string; currentStage: import('./types').ConversationStage; currentScriptId?: string }) => {
+    try {
+      serverLogger.info('Generating alternative tip', {
+        conversationId: payload.conversationId,
+        stage: payload.currentStage,
+        currentScriptId: payload.currentScriptId,
+      });
+
+      // Generate alternative tip (strict selection)
+      const tip = await aiAnalysisService.generateAlternativeTip(
+        payload.conversationId,
+        payload.currentStage,
+        payload.currentScriptId
+      );
+
+      socket.emit('AI_TIP', {
+        type: 'AI_TIP',
+        payload: tip,
+      });
+
+      serverLogger.info('Alternative tip sent', {
+        conversationId: payload.conversationId,
+        heading: tip.heading,
+      });
+    } catch (error: any) {
+      serverLogger.error('Error generating alternative tip', {
+        conversationId: payload.conversationId,
+        error: error.message,
+      });
+
+      socket.emit('ERROR', {
+        type: 'ERROR',
+        payload: {
+          conversationId: payload.conversationId,
+          message: 'Failed to generate alternative tip',
+          code: 'ALTERNATIVE_TIP_ERROR',
+          timestamp: Date.now(),
+        },
+      });
+    }
+  });
+
+  // ========================================================================
   // END_CONVERSATION - End conversation session
   // ========================================================================
   socket.on('END_CONVERSATION', (payload: EndConversationPayload) => {
@@ -1480,7 +1538,8 @@ const PORT = process.env.PORT || 8080;
 httpServer.listen(PORT, () => {
   serverLogger.info(`Server running on port ${PORT}`);
   serverLogger.info(`Environment: ${process.env.NODE_ENV || 'development'}`);
-  serverLogger.info(`CORS origins: ${corsOrigin.join(', ')}`);
+  serverLogger.info(`Environment: ${process.env.NODE_ENV || 'development'}`);
+  serverLogger.info(`CORS configured dynamically`);
 });
 
 // Graceful shutdown

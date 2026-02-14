@@ -1,5 +1,6 @@
-export type ConversationStage = 'GREETING' | 'DISCOVERY' | 'VALUE_PROP' | 'OBJECTION_HANDLING' | 'NEXT_STEPS' | 'CONVERSION';
+export type ConversationStage = 'GREETING' | 'DISCOVERY' | 'VALUE_PROP' | 'OBJECTION_HANDLING' | 'NEXT_STEPS' | 'CLOSING' | 'CONVERSION';
 export interface DialogueOption {
+    id?: string;
     label: string;
     script: string;
 }

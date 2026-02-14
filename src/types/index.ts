@@ -6,9 +6,11 @@ export type ConversationStage =
   | 'VALUE_PROP'
   | 'OBJECTION_HANDLING'
   | 'NEXT_STEPS'
+  | 'CLOSING'
   | 'CONVERSION';
 
 export interface DialogueOption {
+  id?: string; // Original Script ID
   label: string; // "Minimal", "Explanative", "Contextual"
   script: string; // Exact words to say
 }
